@@ -1,0 +1,87 @@
+********************** All Nodes***********************
+sudo apt update
+sudo apt upgrade -y
+#installation docker
+sudo apt install docker.io -y
+
+**************************Master Node config*****************************************	
+	#Add kubernetes dependencies
+sudo apt-get install -y apt-transport-https ca-certificates curl
+curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key add
+echo "deb https://apt.kubernetes.io/ kubernetes-xenial main" >> ~/kubernetes.list
+sudo mv ~/kubernetes.list /etc/apt/sources.list.d
+sudo apt update
+#optionnel
+hostnamectl set-hostname master.m2i.com
+exec bash
+#Install Kubernetes components
+sudo apt install kubeadm kubectl kubelet
+sudo apt-mark hold kubeadm kubelet kubectl
+sudo kubeadm init --pod-network-cidr=10.244.0.0/16
+mkdir -p $HOME/.kube
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
+
+Kubectl get po -A
+#output
+kube-flannel   kube-flannel-ds-zjnqh                    1/1     Running   0          21s
+kube-system    coredns-5dd5756b68-cpjr9                 1/1     Running   0          6m54s
+kube-system    coredns-5dd5756b68-ddxkb                 1/1     Running   0          6m54s
+kube-system    etcd-master.m2i.com                      1/1     Running   0          7m12s
+kube-system    kube-apiserver-master.m2i.com            1/1     Running   0          7m15s
+kube-system    kube-controller-manager-master.m2i.com   1/1     Running   0          7m16s
+kube-system    kube-proxy-75dbj                         1/1     Running   0          6m54s
+kube-system    kube-scheduler-master.m2i.com            1/1     Running   0          7m12s
+
+#Print token
+sudo kubeadm token create --print-join-command
+
+****************************** All Node*******************************
+cat <<EOF | sudo tee /etc/docker/daemon.json
+{
+  "exec-opts": ["native.cgroupdriver=systemd"],
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "100m"
+  },
+  "storage-driver": "overlay2"
+}
+EOF
+—------------------------------------------------------------
+sudo systemctl enable docker
+sudo systemctl daemon-reload
+sudo systemctl restart docker
+sudo swapoff -a
+
+***************** Workernode********************
+	#Add kubernetes dependencies
+#optionnel
+sudo hostnamectl set-hostname worker02.m2i.com
+exec bash
+#optionnel
+sudo apt-get install -y apt-transport-https ca-certificates curl
+curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key add
+echo "deb https://apt.kubernetes.io/ kubernetes-xenial main" >> ~/kubernetes.list
+sudo mv ~/kubernetes.list /etc/apt/sources.list.d
+sudo apt update
+sudo apt install kubeadm kubelet -y
+sudo kubeadm join 10.0.0.13:6443 --token q4axum.3rn8ua2lhk9cng01 --discovery-token-ca-cert-hash sha256:360384b8bf0f665602f171c3f1da691cc2c00d811bfa6816b4a9de1fe24325a4
+
+
+
+
+************** optional Node register**************************
+vi nodereg.json 
+{
+  "kind": "Node",
+  "apiVersion": "v1",
+  "metadata": {
+	"name": "worker-node-1.example.com",
+	"labels": {
+  	"name": "firstnode"
+	}
+  }
+}
+
+
