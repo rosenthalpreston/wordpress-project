@@ -1,0 +1,229 @@
+#Inventaire des serveurs
+OS:UBUNTU SERVER 20.04
+01->ansibleserver IP:10.0.0.4; master:10.0.0.5; worker01:10.0.0.6; worker02:10.0.0.7
+
+1-# Installation et configuration de Ansible on ansible serveur:10.0.0.4
+	sudo apt update
+	sudo apt upgrade -y
+
+	sudo apt install software-properties-common -y
+	sudo apt install ansible -y
+	ssh-keygen -t rsa
+
+	
+
+Configuring Master node
+Create a directory called "kube-cluster" in the home directory of your master machine:
+	mkdir ~/kube-cluster
+	cd ~/kube-cluster
+
+Create an "inventory" file, called hosts, using nano or your favorite text editor:
+	vi ~/kube-cluster/hosts
+	[masters]
+	master ansible_host=10.0.0.5 ansible_user=root
+	 
+	[workers]
+	worker1 ansible_host=10.0.0.6 ansible_user=root
+	worker2 ansible_host=10.0.0.7 ansible_user=root
+	 
+	[all:vars]
+	ansible_python_interpreter=/usr/bin/python3
+	
+then test ansible inventory
+	ansible -i hosts -m ping all
+#output
+worker1 | SUCCESS => {
+    "changed": false,
+    "ping": "pong"
+}
+master | SUCCESS => {
+    "changed": false,
+    "ping": "pong"
+}
+worker2 | SUCCESS => {
+    "changed": false,
+    "ping": "pong"
+}
+
+2-Master Main user configuration
+Now, create a non-root user with sudo privileges on all servers to manually log in via SSH as an unprivileged user.
+
+	vi user.yml
+---
+- hosts: all
+  become: yes
+  tasks:
+    - name: create the 'ubuntu' user
+      user: name=ubuntu append=yes state=present createhome=yes shell=/bin/bash
+
+    - name: allow 'ubuntu' to have passwordless sudo
+      lineinfile:
+        dest: /etc/sudoers
+        line: 'ubuntu ALL=(ALL) NOPASSWD: ALL'
+        validate: 'visudo -cf %s'
+
+    - name: set up authorized keys for the ubuntu user
+      authorized_key: user=ubuntu key="{{item}}"
+      with_file:
+        - ~/.ssh/id_rsa.pub
+		
+		
+vi kube-dependencies.yml
+
+---
+- hosts: all
+  become: yes
+  tasks:
+   - name: create Docker config directory
+     file: path=/etc/docker state=directory
+
+   - name: changing Docker to systemd driver
+     copy:
+      dest: "/etc/docker/daemon.json"
+      content: |
+        {
+        "exec-opts": ["native.cgroupdriver=systemd"]
+        }
+
+   - name: install Docker
+     apt:
+       name: docker.io
+       state: present
+       update_cache: true
+
+   - name: install APT Transport HTTPS
+     apt:
+       name: apt-transport-https
+       state: present
+
+   - name: add Kubernetes apt-key
+     apt_key:
+       url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+       state: present
+
+   - name: add Kubernetes' APT repository
+     apt_repository:
+      repo: deb http://apt.kubernetes.io/ kubernetes-xenial main
+      state: present
+      filename: 'kubernetes'
+
+   - name: install kubelet
+     apt:
+       name: kubelet
+       state: present
+       update_cache: true
+
+   - name: install kubeadm
+     apt:
+       name: kubeadm
+       state: present
+
+- hosts: masters
+  become: yes
+  tasks:
+   - name: install kubectl
+     apt:
+       name: kubectl
+       state: present
+       force: yes
+
+
+ansible-playbook -i hosts kube-dependencies.yml
+
+#Output
+PLAY RECAP ***************************************************************************************************************************************************
+master                     : ok=11   changed=8    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+worker1                    : ok=9    changed=8    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+worker2                    : ok=9    changed=8    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+
+
+3-  Setting Up the Control Plane Node
+
+vi master.yml
+
+---
+- hosts: masters
+  become: yes
+  tasks:
+    - name: initialize the cluster
+      shell: kubeadm init --pod-network-cidr=10.244.0.0/16 >> cluster_initialized.txt
+      args:
+        chdir: $HOME
+        creates: cluster_initialized.txt
+
+    - name: create .kube directory
+      become: yes
+      become_user: ubuntu
+      file:
+        path: $HOME/.kube
+        state: directory
+        mode: 0755
+
+    - name: copy admin.conf to user's kube config
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /home/ubuntu/.kube/config
+        remote_src: yes
+        owner: ubuntu
+
+    - name: install Pod network
+      become: yes
+      become_user: ubuntu
+      shell: kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml >> pod_network_setup.txt
+      args:
+        chdir: $HOME
+        creates: pod_network_setup.txt
+
+
+ansible-playbook -i hosts ~/kube-cluster/master.yml
+
+PLAY RECAP ***************************************************************************************************************************************************
+master                     : ok=5    changed=4    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+
+5- you can verify on the k8s master node the configuration of the controller manager
+
+sudo su ubuntu
+ubuntu@master:/home/azureuser$ kubectl get nodes
+NAME             STATUS   ROLES           AGE     VERSION
+master.m2i.com   Ready    control-plane   4m48s   v1.28.2
+
+
+6- Setting up the worker nodes
+
+azureuser@ansible:~/kube-cluster$ vi workers.yml
+
+---
+- hosts: masters
+  become: yes
+  gather_facts: false
+  tasks:
+    - name: get join command
+      shell: kubeadm token create --print-join-command
+      register: join_command_raw
+
+    - name: set join command
+      set_fact:
+        join_command: "{{ join_command_raw.stdout_lines[0] }}"
+
+- hosts: workers
+  become: yes
+  tasks:
+    - name: join cluster
+      shell: "{{ hostvars['master'].join_command }} >> node_joined.txt"
+      args:
+        chdir: $HOME
+        creates: node_joined.txt
+		
+azureuser@ansible:~/kube-cluster$ ansible-playbook -i hosts workers.yml
+PLAY RECAP ***************************************************************************************************************************************************
+master                     : ok=2    changed=1    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+worker1                    : ok=2    changed=1    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+worker2                    : ok=2    changed=1    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+
+Now our cluster is ready to production deployment
+
+ubuntu@master:/home/azureuser$ kubectl get nodes
+NAME              STATUS   ROLES           AGE    VERSION
+master.m2i.com    Ready    control-plane   16m    v1.28.2
+worker1.m2i.com   Ready    <none>          114s   v1.28.2
+worker2.m2i.com   Ready    <none>          114s   v1.28.2
